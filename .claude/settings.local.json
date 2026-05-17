@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"from app.main import app; print\\('OK', len\\(app.routes\\), 'routes'\\)\")",
+      "Bash(python -c \"import groq; print\\('groq OK', groq.__version__\\)\")"
+    ]
+  }
+}

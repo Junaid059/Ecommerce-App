@@ -1,73 +1,129 @@
-from fastapi import FastAPI, Depends, HTTPException, status, APIRouter, UploadFile, File
-from sqlalchemy.orm import Session  
+from typing import Optional
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, Request
+
+from sqlalchemy.orm import Session
+
 from app.database import get_db
 from app.models import models
 from app.schemas import schemas
-from .Oauth2 import getCurrentUser
+from .Oauth2 import require_roles
 from ..utils import save_image
 
-router = APIRouter()
+router = APIRouter(prefix="/api/products", tags=["Products"])
 
-def userRole(user = Depends(getCurrentUser)):
-    if user.role not in ("seller","admin","customer"):
-        raise HTTPException(status_code = status.HTTP_403_FORBIDDEN, detail="access required")
-    return user
 
-@router.post("/createProduct",response_model = schemas.ProductCreate)
-def createProduct(id: int, product: schemas.ProductCreate, db: Session = Depends(get_db),user =Depends(userRole),image: UploadFile = File(None)  ):
-    if user.role != "seller" and user.role != "admin":
-        raise HTTPException(status_code = status.HTTP_403_FORBIDDEN, detail="Seller or admin access required")
-    image_url = product.image_url 
-    if image:
-        try:
-            image_url = save_image(image)  
-        except HTTPException as e:
-            raise HTTPException(status_code=e.status_code, detail=f"Image upload failed: {e.detail}")
-    product = models.Product(name = product.name, price= product.price, description = product.description, image_url = product.image_url, category=product.category,stock = product.stock)
-    db.add(product)
-    db.commit()
-    db.refresh(product)
-    return product
+def _safe_reindex(db: Session):
+    """Re-build FAISS index after product mutations. Never raise to caller."""
+    try:
+        from app.ai import embeddings
+        embeddings.build_index(db)
+    except Exception as e:
+        print(f"[product] reindex skipped: {e}")
 
-@router.get("/getProducts/{category}",response_model = schemas.ProductCreate)
-def getProducts(category:str,db: Session = Depends(get_db)):
-    products = db.query(models.Product).filter(models.Product.category == category).limit(10).all()
-    db.commit()
-    return products
 
-@router.get("/getProduct/{product_id}",response_model = schemas.ProductCreate)
-def getProduct(id: int,db: Session = Depends(get_db)):
-    product = db.query(models.Product).filter(models.Product.id == id).first()
+@router.get("", response_model=list[schemas.ProductRead])
+def list_products(
+    db: Session = Depends(get_db),
+    category: Optional[int] = None,
+    featured: Optional[bool] = None,
+    limit: int = 50,
+    offset: int = 0,
+):
+    q = db.query(models.Product)
+    if category is not None:
+        q = q.filter(models.Product.category == category)
+    if featured is not None:
+        q = q.filter(models.Product.is_featured.is_(featured))
+    return q.order_by(models.Product.created_at.desc()).limit(limit).offset(offset).all()
+
+
+@router.get("/{product_id}", response_model=schemas.ProductRead)
+def get_product(product_id: int, request: Request, db: Session = Depends(get_db)):
+    product = db.query(models.Product).filter(models.Product.id == product_id).first()
     if product is None:
-        raise HTTPException(status_code = status.HTTP_404_NOT_FOUND, detail="Product not found")
-    db.commit()
+        raise HTTPException(status_code=404, detail="Product not found")
+    # log view (best-effort; never fail the request)
+    try:
+        from .Oauth2 import verifyToken
+        uid = None
+        auth = request.headers.get("Authorization", "")
+        if auth.lower().startswith("bearer "):
+            tok = auth.split(" ", 1)[1].strip()
+            try:
+                data = verifyToken(tok, HTTPException(status_code=401, detail="x"))
+                uid = data.id
+            except Exception:
+                uid = None
+        sid = request.headers.get("X-Session-Id")
+        db.add(models.ProductView(user_id=uid, session_id=sid, product_id=product_id))
+        db.commit()
+    except Exception:
+        db.rollback()
     return product
 
-@router.put("/updateProduct/{product_id}",response_model = schemas.ProductCreate)
-def updateProduct(id:int, product_update: schemas.ProductCreate,db: Session = Depends(get_db),user = Depends(userRole)):
-    if user.role != "seller" and user.role != "admin":
-        raise HTTPException(status_code = status.HTTP_403_FORBIDDEN, detail="Seller or admin access required")
-    product = db.query(models.Product).filter(models.Product.id == id).first()
+
+@router.post("", response_model=schemas.ProductRead, status_code=201)
+def create_product(
+    product: schemas.ProductCreate,
+    db: Session = Depends(get_db),
+    _=Depends(require_roles("admin", "seller")),
+):
+    new_product = models.Product(
+        name=product.name,
+        price=product.price,
+        description=product.description,
+        image_url=product.image_url,
+        category=product.category,
+        stock=product.stock,
+        is_featured=bool(product.is_featured),
+    )
+    db.add(new_product)
+    db.commit()
+    db.refresh(new_product)
+    _safe_reindex(db)
+    return new_product
+
+
+@router.post("/upload-image")
+def upload_product_image(
+    request: Request,
+    image: UploadFile = File(...),
+    _=Depends(require_roles("admin", "seller")),
+):
+    """Upload an image and return a public URL the frontend can use as `image_url`."""
+    rel_path = save_image(image)  # e.g. uploads/abc.jpg
+    base = str(request.base_url).rstrip("/")
+    return {"image_url": f"{base}/{rel_path.replace(chr(92), '/')}"}
+
+
+@router.put("/{product_id}", response_model=schemas.ProductRead)
+def update_product(
+    product_id: int,
+    product_update: schemas.ProductCreate,
+    db: Session = Depends(get_db),
+    _=Depends(require_roles("admin", "seller")),
+):
+    product = db.query(models.Product).filter(models.Product.id == product_id).first()
     if not product:
-        raise HTTPException(status_code = status.HTTP_404_NOT_FOUND, detail="Product not found")
-    setattr(product, "name",product_update.name)
-    setattr(product, "price",product_update.price)
-    setattr(product, "description",product_update.description)
-    setattr(product, "image_url",product_update.image_url)
-    setattr(product, "category",product_update.category)
-    setattr(product,"stock",product_update.stock)
+        raise HTTPException(status_code=404, detail="Product not found")
+    for field in ("name", "price", "description", "image_url", "category", "stock", "is_featured"):
+        setattr(product, field, getattr(product_update, field))
     db.commit()
     db.refresh(product)
+    _safe_reindex(db)
     return product
 
-@router.delete("/deleteProduct/{product_id}",response_model = schemas.ProductCreate)
-def deleteProduct(id: int, db: Session = Depends(get_db),user = Depends(userRole)):
-    if user.role != "seller" and user.role != "admin":
-        raise HTTPException(status_code = status.HTTP_403_FORBIDDEN, detail="Seller or admin access required")
-    product = db.query(models.Product).filter(models.Product.id == id).first()
+
+@router.delete("/{product_id}", status_code=204)
+def delete_product(
+    product_id: int,
+    db: Session = Depends(get_db),
+    _=Depends(require_roles("admin", "seller")),
+):
+    product = db.query(models.Product).filter(models.Product.id == product_id).first()
     if not product:
-        raise HTTPException(status_code = status.HTTP_404_NOT_FOUND, detail="Product not found")
+        raise HTTPException(status_code=404, detail="Product not found")
     db.delete(product)
     db.commit()
-    return product
-
+    _safe_reindex(db)
+    return None

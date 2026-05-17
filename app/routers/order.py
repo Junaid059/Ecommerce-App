@@ -1,81 +1,96 @@
-from fastapi import FastAPI, Depends, HTTPException, status, APIRouter
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+
 from app.database import get_db
 from app.models import models
 from app.schemas import schemas
-from .Oauth2 import getCurrentUser
+from .Oauth2 import getCurrentUser, require_roles
 
-router = APIRouter()
+router = APIRouter(prefix="/api/orders", tags=["Orders"])
 
-def userRole(user = Depends(getCurrentUser)):
-    if user.role not in ("customer","admin"):
-        raise HTTPException(status_code = status.HTTP_403_FORBIDDEN, detail="Customer access required")
-    return user
 
-@router.post("/createOrder",response_model = schemas.OrderRead)
-def createOrder(order: schemas.OrderCreate, db: Session = Depends(get_db),user = Depends(userRole)):
-    if user.role != "customer":
-        raise HTTPException(status_code = status.HTTP_403_FORBIDDEN, detail="Customer access required")
-    # Fetch the product from the database
+@router.get("", response_model=list[schemas.OrderRead])
+def list_my_orders(
+    db: Session = Depends(get_db),
+    user=Depends(getCurrentUser),
+    limit: int = 50,
+    offset: int = 0,
+):
+    q = db.query(models.Order)
+    if user.role != "admin":
+        q = q.filter(models.Order.user_id == user.id)
+    return q.order_by(models.Order.order_id.desc()).limit(limit).offset(offset).all()
+
+
+@router.get("/{order_id}", response_model=schemas.OrderRead)
+def get_order(
+    order_id: int,
+    db: Session = Depends(get_db),
+    user=Depends(getCurrentUser),
+):
+    order = db.query(models.Order).filter(models.Order.order_id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if user.role != "admin" and order.user_id != user.id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    return order
+
+
+@router.post("", response_model=schemas.OrderRead, status_code=201)
+def create_order(
+    order: schemas.OrderCreate,
+    db: Session = Depends(get_db),
+    user=Depends(require_roles("customer")),
+):
     product = db.query(models.Product).filter(models.Product.id == order.product_id).first()
     if not product:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found")
-    # Use the instance attribute for stock check and update
-    current_stock = product.__dict__.get('stock')
-    if current_stock is None:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Product stock not set")
-    if current_stock < order.quantity:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Not enough stock available")
-    # Create the order
-    new_order = models.Order(user_id=order.user_id, product_id=order.product_id, quantity=order.quantity, address=order.address)
-    # Update the product stock (instance attribute)
-    product.__dict__['stock'] = current_stock - order.quantity
+        raise HTTPException(status_code=404, detail="Product not found")
+    if product.stock < order.quantity:
+        raise HTTPException(status_code=400, detail="Not enough stock available")
+    new_order = models.Order(
+        user_id=user.id,
+        product_id=order.product_id,
+        quantity=order.quantity,
+        address=order.address,
+        payment_status="pending",
+        total_amount=product.price * order.quantity,
+    )
+    product.stock = product.stock - order.quantity  # type: ignore[assignment]
     db.add(new_order)
     db.commit()
     db.refresh(new_order)
     return new_order
 
-@router.get("/getOrders/{user_id}",response_model = schemas.OrderRead)
-def getOrders(user_id: int, offset: int = 0, db: Session = Depends(get_db),user = Depends(userRole)):
-    if user.user_id != user_id and user.role != "admin":
-        raise HTTPException(status_code = status.HTTP_403_FORBIDDEN, detail="access denied")
-    orders = db.query(models.Order).filter(models.Order.user_id == user_id).limit(10).offset(offset).all()
-    db.commit()
-    return orders
 
-@router.get("/getOrder/{order_id}",response_model = schemas.OrderRead)
-def getOrder(id: int,db: Session = Depends(get_db),user = Depends(userRole)):
-    if user.role != "customer":
-        raise HTTPException(status_code = status.HTTP_403_FORBIDDEN, detail="Customer access required")
-    order = db.query(models.Order).filter(models.Order.id == id).first()
-    if order is None:
-        raise HTTPException(status_code = status.HTTP_404_NOT_FOUND, detail="Order not found")
-    db.commit()
-    return order
-
-@router.put("/updateOrder/{order_id}",response_model = schemas.OrderRead)
-def updateOrder(id: int, order_update: schemas.OrderCreate, db: Session = Depends(get_db),user = Depends(userRole)):
-    if user.role != "customer":
-        raise HTTPException(status_code = status.HTTP_403_FORBIDDEN, detail="Customer access required")
-    order = db.query(models.Order).filter(models.Order.id == id).first()
+@router.put("/{order_id}/status", response_model=schemas.OrderRead)
+def update_order_status(
+    order_id: int,
+    payload: schemas.OrderStatusUpdate,
+    db: Session = Depends(get_db),
+    _=Depends(require_roles("admin")),
+):
+    order = db.query(models.Order).filter(models.Order.order_id == order_id).first()
     if not order:
-        raise HTTPException(status_code = status.HTTP_404_NOT_FOUND, detail="Order not found")
-    setattr(order, "user_id", order_update.user_id)
-    setattr(order, "product_id", order_update.product_id)
-    setattr(order, "quantity", order_update.quantity)
-    setattr(order,"address",order_update.address)
+        raise HTTPException(status_code=404, detail="Order not found")
+    order.status = payload.status
+    if payload.tracking_number is not None:
+        order.tracking_number = payload.tracking_number
     db.commit()
     db.refresh(order)
     return order
 
-@router.delete("/deleteOrder/{order_id}",response_model = schemas.OrderRead)
-def deleteOrder(id: int, db: Session = Depends(get_db),user = Depends(userRole)):
-    if user.role != "customer":
-        raise HTTPException(status_code = status.HTTP_403_FORBIDDEN, detail="Customer access required")
-    order = db.query(models.Order).filter(models.Order.id == id).first()
+
+@router.delete("/{order_id}", status_code=204)
+def delete_order(
+    order_id: int,
+    db: Session = Depends(get_db),
+    user=Depends(getCurrentUser),
+):
+    order = db.query(models.Order).filter(models.Order.order_id == order_id).first()
     if not order:
-        raise HTTPException(status_code = status.HTTP_404_NOT_FOUND, detail="Order not found")
+        raise HTTPException(status_code=404, detail="Order not found")
+    if user.role != "admin" and order.user_id != user.id:
+        raise HTTPException(status_code=403, detail="Access denied")
     db.delete(order)
     db.commit()
-    return order
-
+    return None

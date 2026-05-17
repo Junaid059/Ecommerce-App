@@ -1,64 +1,65 @@
-from fastapi import FastAPI, Depends, HTTPException, status, APIRouter
-from ..schemas import schemas
-from ..models import models  
-from ..database import get_db
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from .Oauth2 import getCurrentUser
+
+from ..schemas import schemas
+from ..models import models
+from ..database import get_db
+from .Oauth2 import require_roles
+
+router = APIRouter(prefix="/api/categories", tags=["Categories"])
 
 
-router = APIRouter()
-
-def userRole(user = Depends(getCurrentUser)):
-    if user.role !="admin":
-        raise HTTPException(status_code = status.HTTP_403_FORBIDDEN, detail="admin access required")
-    return user
+@router.get("", response_model=list[schemas.CategoryRead])
+def list_categories(db: Session = Depends(get_db)):
+    return db.query(models.Category).all()
 
 
-@router.post("/createCategory",response_model = schemas.CategoryRead)
-def createCategory(category: schemas.CategoryCreate,db: Session = Depends(get_db),user = Depends(userRole)):
-    if user.role != "admin":
-        raise HTTPException(status_code = status.HTTP_403_FORBIDDEN, detail="admin access required")
-    category = models.Category(name = category.name)
-    db.add(category)
+@router.get("/{category_id}", response_model=schemas.CategoryRead)
+def get_category(category_id: int, db: Session = Depends(get_db)):
+    cat = db.query(models.Category).filter(models.Category.id == category_id).first()
+    if not cat:
+        raise HTTPException(status_code=404, detail="Category not found")
+    return cat
+
+
+@router.post("", response_model=schemas.CategoryRead, status_code=201)
+def create_category(
+    category: schemas.CategoryCreate,
+    db: Session = Depends(get_db),
+    _=Depends(require_roles("admin")),
+):
+    new_cat = models.Category(name=category.name)
+    db.add(new_cat)
     db.commit()
-    db.refresh(category)
-    return category
+    db.refresh(new_cat)
+    return new_cat
 
-@router.get("/getCategories",response_model = schemas.CategoryRead)
-def getCategories(db:Session = Depends(get_db)):
-    categotries = db.query(models.Category).all()
+
+@router.put("/{category_id}", response_model=schemas.CategoryRead)
+def update_category(
+    category_id: int,
+    update: schemas.CategoryCreate,
+    db: Session = Depends(get_db),
+    _=Depends(require_roles("admin")),
+):
+    cat = db.query(models.Category).filter(models.Category.id == category_id).first()
+    if not cat:
+        raise HTTPException(status_code=404, detail="Category not found")
+    cat.name = update.name  # type: ignore[assignment]
     db.commit()
-    return categotries
+    db.refresh(cat)
+    return cat
 
-@router.get("/getCategory/{category_id}",response_model = schemas.CategoryRead)
-def getCategory(id: int, category: schemas.CategoryRead, db:Session = Depends(get_db)):
-    category = db.query(models.Category).filter(models.Category.id == id).first()
-    if not category:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Category not found")
+
+@router.delete("/{category_id}", status_code=204)
+def delete_category(
+    category_id: int,
+    db: Session = Depends(get_db),
+    _=Depends(require_roles("admin")),
+):
+    cat = db.query(models.Category).filter(models.Category.id == category_id).first()
+    if not cat:
+        raise HTTPException(status_code=404, detail="Category not found")
+    db.delete(cat)
     db.commit()
-    return category
-
-@router.put("/updateCategory/{category_id}",response_model = schemas.CategoryRead)
-def updateCategory(id:int,category_update: schemas.CategoryRead, db: Session = Depends(get_db),user = Depends(userRole)):
-    if user.role != "admin":
-        raise HTTPException(status_code = status.HTTP_403_FORBIDDEN, detail="admin access required")
-    category = db.query(models.Category).filter(models.Category.id == id).first()
-    if not category:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Category not found")
-    setattr(category,"name",category_update.name)
-    db.commit()
-    db.refresh(category)
-    return category
-
-
-@router.delete("/deleteCategory/{category_id}",response_model = schemas.CategoryRead)
-def deleteCategory(id: int, db: Session = Depends(get_db),user = Depends(userRole)):
-    if user.role != "admin":
-        raise HTTPException(status_code = status.HTTP_403_FORBIDDEN, detail="admin access required")
-    category = db.query(models.Category).filter(models.Category.id == id).first()
-    if not category:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Category not found")
-    db.delete(category)
-    db.commit()
-    return category
-
+    return None

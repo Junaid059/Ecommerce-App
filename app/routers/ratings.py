@@ -1,65 +1,70 @@
-from fastapi import FastAPI, Depends, HTTPException, status, APIRouter
-from ..schemas import schemas
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+
 from app.database import get_db
 from app.models import models
+from app.schemas import schemas
 from .Oauth2 import getCurrentUser
 
-def userRole(user = Depends(getCurrentUser)):
-    if user.role not in ("customer","admin"):
-        raise HTTPException(status_code = status.HTTP_403_FORBIDDEN, detail="Customer access required")
-    return user
+router = APIRouter(prefix="/api/ratings", tags=["Ratings"])
 
 
-router = APIRouter()
-
-@router.post("/createRating",response_model = schemas.RatingRead)
-def createRating(rating:schemas.RatingCreate,db: Session = Depends(get_db)):
-    rating = models.Rating(product_id = rating.product_id,user_id = rating.user_id, rating = rating.rating)
-    db.add(rating)
+@router.post("", response_model=schemas.RatingRead, status_code=201)
+def create_rating(
+    rating: schemas.RatingCreate,
+    db: Session = Depends(get_db),
+    user=Depends(getCurrentUser),
+):
+    # Upsert: one rating per user per product
+    existing = (
+        db.query(models.Rating)
+        .filter(
+            models.Rating.user_id == user.id,
+            models.Rating.product_id == rating.product_id,
+        )
+        .first()
+    )
+    if existing:
+        existing.rating = rating.rating  # type: ignore[assignment]
+        db.commit()
+        db.refresh(existing)
+        return existing
+    new_rating = models.Rating(
+        product_id=rating.product_id,
+        user_id=user.id,
+        rating=rating.rating,
+    )
+    db.add(new_rating)
     db.commit()
-    db.refresh(rating)
-    return rating
+    db.refresh(new_rating)
+    return new_rating
 
-@router.get("/getRatings/{product_id}",response_model = schemas.RatingRead)
-def getRatings(product_id: int, db: Session = Depends(get_db),user = Depends(userRole)):
-    if user.role != "customer" and user.role != "admin":
-        raise HTTPException(status_code = status.HTTP_403_FORBIDDEN, detail="access denied")
-    ratings = db.query(models.Rating).filter(models.Rating.product_id == product_id).limit(10).all()
-    db.commit()
-    return ratings
 
-@router.get("/getRating/{rating_id}",response_model = schemas.RatingRead)
-def getRating(id: int,db: Session = Depends(get_db),user = Depends(userRole)):
-    if user.role != "customer" and user.role != "admin":
-        raise HTTPException(status_code = status.HTTP_403_FORBIDDEN, detail="access denied")
-    rating = db.query(models.Rating).filter(models.Rating.id == id).first()
-    if rating is None:
-        raise HTTPException(status_code = status.HTTP_404_NOT_FOUND, detail="Rating not found")
-    db.commit()
-    return rating
+@router.get("/product/{product_id}", response_model=list[schemas.RatingRead])
+def list_product_ratings(product_id: int, db: Session = Depends(get_db)):
+    return db.query(models.Rating).filter(models.Rating.product_id == product_id).all()
 
-@router.put("/updateRating/{rating_id}",response_model = schemas.RatingRead)
-def updateRating(id: int, rating_update: schemas.RatingCreate, db: Session = Depends(get_db),user = Depends(userRole)):
-    if user.role != "customer" and user.role != "admin":
-        raise HTTPException(status_code = status.HTTP_403_FORBIDDEN, detail="access denied")
-    rating = db.query(models.Rating).filter(models.Rating.id == id).first()
-    if not rating:
-        raise HTTPException(status_code = status.HTTP_404_NOT_FOUND, detail="Rating not found")
-    setattr(rating, "product_id", rating_update.product_id)
-    setattr(rating, "user_id", rating_update.user_id)
-    setattr(rating, "rating", rating_update.rating)
-    db.commit()
-    db.refresh(rating)
-    return rating
 
-@router.delete("/deleteRating/{rating_id}",response_model = schemas.RatingRead)
-def deleteRating(id: int, db: Session = Depends(get_db),user = Depends(userRole)):
-    if user.role != "customer" and user.role != "admin":
-        raise HTTPException(status_code = status.HTTP_403_FORBIDDEN, detail="access denied")
-    rating = db.query(models.Rating).filter(models.Rating.id == id).first()
-    if not rating:
-        raise HTTPException(status_code = status.HTTP_404_NOT_FOUND, detail="Rating not found")
-    db.delete(rating)
+@router.get("/product/{product_id}/average")
+def average_rating(product_id: int, db: Session = Depends(get_db)):
+    ratings = db.query(models.Rating).filter(models.Rating.product_id == product_id).all()
+    if not ratings:
+        return {"product_id": product_id, "average": 0, "count": 0}
+    avg = sum(r.rating for r in ratings) / len(ratings)
+    return {"product_id": product_id, "average": round(avg, 2), "count": len(ratings)}
+
+
+@router.delete("/{rating_id}", status_code=204)
+def delete_rating(
+    rating_id: int,
+    db: Session = Depends(get_db),
+    user=Depends(getCurrentUser),
+):
+    r = db.query(models.Rating).filter(models.Rating.id == rating_id).first()
+    if not r:
+        raise HTTPException(status_code=404, detail="Rating not found")
+    if user.role != "admin" and r.user_id != user.id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    db.delete(r)
     db.commit()
-    return rating
+    return None

@@ -1,261 +1,159 @@
-# E-Commerce API - Advanced Platform with Stripe Integration
+# Shopwave — Full-Stack AI E-Commerce
 
-A modern, production-ready e-commerce API built with FastAPI, PostgreSQL, Stripe payments, and async task processing. Features real-time product suggestions, secure authentication, and complete order management.
+A production-quality e-commerce application showcasing a **FastAPI backend** and a **React + Tailwind frontend**, plus a full **GenAI layer**: a tool-calling RAG chatbot (Groq + LangGraph-style ReAct), local FAISS semantic search, hybrid recommendations, and AI-generated product copy.
 
-## Architecture Overview
+![architecture](ecommerce-architetcural%20diagram.png)
 
-![E-Commerce Architecture Diagram](ecommerce-architetcural%20diagram.png)
+---
 
-The architecture illustrates the complete system design with all integrated components working together seamlessly.
+## Stack
 
-## Key Features
+| Layer | Tech |
+| --- | --- |
+| Frontend | React 18, Vite, React Router, Tailwind CSS, Zustand, Axios, react-hot-toast |
+| Backend | FastAPI, SQLAlchemy, SQLite (or Postgres), JWT (python-jose), Stripe, Celery + Redis |
+| AI | Groq (Llama 3.3 70B), `sentence-transformers` (MiniLM L6 v2), FAISS, custom ReAct tool-calling agent |
+| Auth | Access + refresh tokens, role-based access (customer / seller / admin) |
+| Payments | Stripe Checkout Sessions + Stripe coupons for discounts |
 
-### 1. **Authentication & Authorization**
-- JWT-based token authentication (Access + Refresh tokens)
-- Role-based access control (customer, admin, seller)
-- Secure password hashing with bcrypt
-- Token refresh mechanism without re-login
+---
 
-### 2. **Product Management**
-- Full CRUD operations
-- Category-based organization
-- Dynamic inventory management with stock tracking
-- Image URL support for product display
-- Advanced search functionality
+## Features
 
-### 3. **Smart Product Recommendations**
-- AI-based suggestions using purchase history analysis
-- Recommends products from previously purchased categories
-- Personalized browsing experience
-- Cold-start solution with popular products for new users
+### Core e-commerce
+- Catalog: products, categories, image uploads, ratings, comments, wishlists, cart
+- Stripe Checkout with webhook-style confirmation
+- **Order lifecycle**: `pending → processing → shipped → delivered` (+ `cancelled`) with admin status controls and tracking numbers
+- **Coupons / promo codes**: percent or fixed, expiry, min-order, max-uses, applied at Stripe and persisted on order
+- **Featured products** with auto-rotating homepage hero carousel
+- Recently-viewed products (client-side, localStorage)
+- JWT auth with refresh-token rotation
+- Admin dashboard: products, categories, orders, coupons
 
-### 4. **Shopping Cart System**
-- Add/update/remove items
-- Real-time quantity management
-- Persistent cart storage
-- Cart validation before checkout
+### GenAI layer
+- **Customer-support chatbot** — floating widget on every page. ReAct tool-calling loop with 4 tools:
+  - `search_products` (RAG over the live catalog)
+  - `get_my_orders` (only for authed users)
+  - `get_product`
+  - `get_faq` (shipping, returns, payment, contact)
+  - Per-session conversation memory persisted to DB
+- **Semantic search** — `/api/ai/semantic-search` + a frontend toggle ("AI search") on the search page. Powered by local MiniLM embeddings + FAISS (no API cost).
+- **Hybrid recommendations** — `/api/ai/recommendations` builds a "taste profile" from purchase history and retrieves semantically similar products. Falls back to featured/popular for anonymous users.
+- **Related products** — `/api/ai/related/{product_id}` on every product detail page.
+- **AI description generator** — one-click "✨ Generate with AI" button in the admin product form.
+- **Auto-reindex** — FAISS index rebuilt automatically on product create/update/delete.
 
-### 5. **Stripe Payment Integration**
-- **Secure checkout sessions**: PCI-compliant payment processing
-- **payment methods**: Cards
-- **Real-time payment verification**: Status tracking
-- **Session management**: Metadata storage for orders
-- **Error handling**: Comprehensive Stripe error management
-- **Stock management**: Automatic inventory updates on successful payment
+---
 
-### 6. **Order Management**
-- Complete order lifecycle tracking
-- Payment status monitoring (pending/paid/failed)
-- Stripe session ID correlation
-- Address and delivery tracking
-- Order history retrieval
-
-### 7. **User Engagement Features**
-- **Ratings & Reviews**: 5-star product ratings
-- **Comments**: Detailed product feedback
-- **Wishlist**: Save favorite products for later
-- **Order Tracking**: Real-time order status
-
-### 8. **Async Email Notifications**
-- Celery-based background task processing
-- Redis-backed task queue
-- Order confirmation emails
-- Payment receipts
-- User notification alerts
-- Non-blocking task execution
-
-## Tech Stack
-
-| Component | Technology | Version |
-|-----------|-----------|---------|
-| **Framework** | FastAPI | Latest |
-| **Database** | PostgreSQL + SQLAlchemy | 14+ |
-| **Authentication** | JWT (python-jose) | Latest |
-| **Payment** | Stripe API | Test |
-| **Async Tasks** | Celery + Redis |
-| **Email** | aiosmtplib | Latest |
-| **Validation** | Pydantic | Latest |
-| **Security** | bcrypt, passlib | Latest |
-| **Server** | Uvicorn | Latest |
-
-##  API Endpoints
-
-### **Authentication**
-```
-POST   /api/users/register          Create new user account
-POST   /api/users/login             Login and get tokens
-POST   /api/users/refresh           Refresh access token
-GET    /api/users/me                Get current user profile
-```
-
-### **Products**
-```
-GET    /api/products                List all products (paginated)
-POST   /api/products                Create product (admin)
-GET    /api/products/{id}           Get product details
-PUT    /api/products/{id}           Update product (admin)
-DELETE /api/products/{id}           Delete product (admin)
-GET    /api/search                  Search products by name/category
-```
-
-### **Smart Recommendations**
-```
-GET    /api/checkout/suggestions    Get personalized product suggestions
-        Query: ?limit=5 (default)
-```
-
-### **Shopping Cart**
-```
-POST   /api/cart                    Add item to cart
-GET    /api/cart                    Get user's cart
-PUT    /api/cart/{item_id}          Update cart item quantity
-DELETE /api/cart/{item_id}          Remove item from cart
-```
-
-### **Checkout & Payment**
-```
-POST   /api/checkout/create-session      Create Stripe checkout session
-    Request Body: {
-        "success_url": "https://yoursite.com/success",
-        "cancel_url": "https://yoursite.com/cancel",
-        "address": "123 Main St, City, State"
-    }
-
-POST   /api/checkout/confirm-payment     Verify & finalize payment
-    Query: ?session_id=cs_test_xxxxx
-
-GET    /api/checkout/session/{session_id}  Get payment session details
-```
-
-### **Orders**
-```
-GET    /api/orders                  Get user's orders
-GET    /api/orders/{order_id}       Get order details
-POST   /api/orders                  Create order (legacy, use checkout)
-```
-
-### **Wishlist**
-```
-POST   /api/wishlist                Add product to wishlist
-GET    /api/wishlist                Get user's wishlist
-DELETE /api/wishlist/{product_id}   Remove from wishlist
-```
-
-### **Ratings & Reviews**
-```
-POST   /api/ratings                 Add product rating
-GET    /api/products/{id}/ratings   Get product ratings
-POST   /api/comments                Add product comment
-GET    /api/products/{id}/comments  Get product comments
-```
-
-### **Categories**
-```
-GET    /api/categories              List all categories
-POST   /api/categories              Create category (admin)
-GET    /api/categories/{id}         Get category details
-```
-
-
-#### 2. Confirm Payment & Create Orders
-**Endpoint:** `POST /api/checkout/confirm-payment?session_id=...`
-
-After user completes Stripe payment, call this endpoint to:
-- Verify payment with Stripe
-- Create Order records
-- Update inventory
-- Clear cart
-- Send confirmation email
-
-### Payment Processing Sequence
+## Project structure
 
 ```
-1. USER ADDS ITEMS TO CART
-   └─> Save in Cart table
-
-2. USER INITIATES CHECKOUT
-   └─> POST /api/checkout/create-session
-       ├─> Validate cart items
-       ├─> Check product stock
-       ├─> Calculate total amount
-       └─> Create Stripe session (returns session_id & url)
-
-3. STRIPE CHECKOUT PAGE
-   └─> User enters payment details
-   └─> Stripe processes payment
-
-4. PAYMENT SUCCESS
-   └─> User redirected to success_url with session_id
-   └─> POST /api/checkout/confirm-payment?session_id=...
-       ├─> Verify payment with Stripe API
-       ├─> Create Order records
-       ├─> Update product stock (inventory)
-       ├─> Clear cart items
-       ├─> Send confirmation email (async via Celery)
-       └─> Return success response
-
-5. ASYNC EMAIL TASK
-   └─> Celery worker picks up task
-   └─> Send order confirmation email
-   └─> Log delivery status
+.
+├── app/
+│   ├── main.py
+│   ├── database.py
+│   ├── models/            # User, Product, Order, Coupon, ChatMessage, ...
+│   ├── schemas/
+│   ├── routers/           # auth, product, order, checkout, coupons, ai, ...
+│   ├── ai/                # GenAI module
+│   │   ├── llm.py         # Groq client wrapper
+│   │   ├── embeddings.py  # sentence-transformers + FAISS index
+│   │   ├── rag.py         # retrieval helpers
+│   │   └── agent.py       # ReAct tool-calling agent
+│   ├── scripts/create_admin.py
+│   ├── tasks.py / celery_app.py
+│   └── utils.py
+├── frontend/
+│   └── src/
+│       ├── components/    # Navbar, ChatWidget, FeaturedCarousel, ProductRow, ProductCard
+│       ├── pages/         # Home, Cart, Orders, ProductDetail, Search, ...
+│       │   └── admin/     # AdminProducts, AdminOrders, AdminCoupons, AdminCategories
+│       ├── lib/           # format, recentlyViewed
+│       └── store/         # Zustand stores
+├── requirements.txt
+└── .env.example
 ```
 
-##  Security Features
+---
 
-### Authentication
-- **JWT Tokens**: Stateless, cryptographically signed
-- **Token Refresh**: Secure token rotation mechanism
-- **Password Hashing**: bcrypt with salt rounds
-- **Role-Based Access**: Customer vs Admin vs Seller endpoints
+## Quick start
 
-### Data Protection
-- **HTTPS/TLS**: Enforce in production
-- **SQL Injection Prevention**: SQLAlchemy parameterized queries
-- **CORS**: Configure for your frontend domain
-- **Rate Limiting**: Implement to prevent abuse
+### 1. Backend
 
+```bash
+python -m venv venv
+venv\Scripts\activate          # Windows
+# source venv/bin/activate     # macOS / Linux
 
-##  Database Schema
+pip install -r requirements.txt
+copy .env.example .env         # edit values
+uvicorn app.main:app --reload
+```
+
+The default `.env.example` ships with `DATABASE_URL=sqlite:///./shopwave.db` so you can run with zero setup.
+
+Create the first admin:
+```bash
+python -m app.scripts.create_admin admin@shopwave.test admin123
+```
+
+### 2. AI setup (free)
+
+Get a free Groq API key at <https://console.groq.com/>, then in `.env`:
+```
+GROQ_API_KEY=gsk_...
+GROQ_MODEL=llama-3.3-70b-versatile
+```
+
+That's it. The first chat / semantic search / recommendation call will download the local embedding model (~80 MB MiniLM) and build the FAISS index on demand. To force a rebuild any time:
+```
+POST /api/ai/reindex   (admin only)
+```
+
+Without `GROQ_API_KEY`, the chatbot and description generator are disabled but semantic search and recommendations still work (they use local embeddings only).
+
+### 3. Stripe (optional)
 
 ```
-┌─────────────────┐
-│     USERS       │
-├─────────────────┤
-│ id (PK)         │
-│ email (UNIQUE)  │
-│ password        │
-│ role            │◄─────┐
-│ is_active       │      │
-│ refresh_token   │      │
-└─────────────────┘      │
-        │                │
-        │                │
-        └────────┬───────┘
-                 │
-     ┌───────────┼───────────┐
-     │           │           │
-     ▼           ▼           ▼
-┌─────────┐ ┌────────┐ ┌──────────┐
-│ ORDERS  │ │ CART   │ │ WISHLIST │
-└─────────┘ └────────┘ └──────────┘
-     │           │           │
-     └───────────┼───────────┘
-                 │
-           ┌─────▼──────┐
-           │  PRODUCTS  │
-           ├────────────┤
-           │ id (PK)    │
-           │ name       │
-           │ price      │
-           │ stock      │
-           │ category   │
-           └────────────┘
-                 │
-                 ▼
-         ┌───────────────┐
-         │   CATEGORIES  │
-         │ ┌───────────┐ │
-         │ │ RATINGS   │ │
-         │ │ COMMENTS  │ │
-         │ └───────────┘ │
-         └───────────────┘
+STRIPE_SECRET_KEY=sk_test_...
+STRIPE_PUBLISHABLE_KEY=pk_test_...
+```
+
+### 4. Frontend
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Vite serves the app at <http://localhost:5173>. It expects the API at <http://localhost:8000> (override with `VITE_API_URL`).
+
+---
+
+## Key API surfaces
+
+| Endpoint | Purpose |
+| --- | --- |
+| `POST /api/auth/login` | JWT (returns access + refresh) |
+| `GET  /api/products?featured=true` | Featured filter for hero carousel |
+| `PUT  /api/orders/{id}/status` | Admin status/tracking update |
+| `POST /api/coupons/apply` | Validate coupon against cart subtotal |
+| `POST /api/checkout/create-session` | Stripe session (optionally with `coupon_code`) |
+| `GET  /api/ai/status` | Probe whether LLM is configured |
+| `POST /api/ai/chat` | Tool-calling support agent |
+| `POST /api/ai/semantic-search` | FAISS + embeddings search |
+| `GET  /api/ai/recommendations` | Hybrid (history + semantic) recs |
+| `GET  /api/ai/related/{id}` | Related-product row for PDP |
+| `POST /api/ai/generate-description` | AI copywriter (admin/seller) |
+| `POST /api/ai/reindex` | Rebuild FAISS index (admin) |
+
+---
+
+## Why this is portfolio-worthy
+
+- Real **agentic AI** (tools + memory) integrated against a real DB, not a toy LLM wrapper
+- **RAG** built from scratch on FAISS — shows understanding of the retrieval layer, not just LangChain magic
+- **Hybrid recommendations** combining behavioural and semantic signals
+- A complete e-commerce flow on top: auth, payments, status lifecycle, promo codes, admin dashboard
+- Zero-setup demo path (SQLite + free Groq tier + local embeddings) — runnable in under 2 minutes

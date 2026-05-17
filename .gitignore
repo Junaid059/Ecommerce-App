@@ -78,3 +78,11 @@ Desktop.ini
 # dotenv environment variables
 .env
 .env.*
+
+# SQLite database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Uploaded images
+uploads/
